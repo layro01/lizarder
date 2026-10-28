@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lizarder"
+version = "0.1.0"
+description = "Find Git projects under a directory and report Lizard code complexity metrics for each."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["lizard>=1.17"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+lizarder = "lizarder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
