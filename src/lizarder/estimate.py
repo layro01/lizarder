@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from lizarder.analysis import ProjectMetrics
+from lizarder.analysis import SHARED_FIELDS, ProjectMetrics
 
 TARGETS = ("input_tokens", "output_tokens")
 # Chosen by leave-one-out error on the bundled training data. Output tokens
@@ -34,8 +34,11 @@ BUNDLED_MODEL = Path(__file__).with_name("token_model.json")
 class ProjectEstimate:
     project: str
     path: str
+    # Same values as the complexity report's SHARED_FIELDS.
+    files: int = 0
     tracked_files: int = 0
     functions: int = 0
+    nloc: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
@@ -170,10 +173,12 @@ class TokenModel:
         }
 
 
+TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "total_low", "total_high")
+
+
 def estimate(metrics: ProjectMetrics, model: TokenModel) -> ProjectEstimate:
-    est = ProjectEstimate(project=metrics.project, path=metrics.path,
-                          tracked_files=metrics.tracked_files, functions=metrics.functions,
-                          error=metrics.error)
+    est = ProjectEstimate(project=metrics.project, path=metrics.path, error=metrics.error,
+                          **{f: getattr(metrics, f) for f in SHARED_FIELDS})
     if metrics.error:
         return est
     values = asdict(metrics)
@@ -190,8 +195,7 @@ def estimate(metrics: ProjectMetrics, model: TokenModel) -> ProjectEstimate:
 def total_estimate(estimates: Sequence[ProjectEstimate]) -> ProjectEstimate:
     total = ProjectEstimate(project="TOTAL", path="TOTAL")
     for e in estimates:
-        for attr in ("tracked_files", "functions", "input_tokens", "output_tokens",
-                     "total_tokens", "total_low", "total_high"):
+        for attr in SHARED_FIELDS + TOKEN_FIELDS:
             setattr(total, attr, getattr(total, attr) + getattr(e, attr))
     total.extrapolated = any(e.extrapolated for e in estimates)
     return total

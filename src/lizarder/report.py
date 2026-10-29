@@ -15,16 +15,25 @@ Column = Tuple[str, str, Format]
 
 FIELDS = [f.name for f in fields(ProjectMetrics)]
 
-# (header, attribute, format) for the human-readable table.
-TABLE_COLUMNS: List[Column] = [
-    ("Project", "path", "{}"),
-    ("Files", "files", "{:,}"),
+# Table columns are (header, attribute, format), where format is a str.format
+# pattern for the attribute or a callable taking the whole row.
+
+# Shown identically by every command; one entry per analysis.SHARED_FIELDS.
+SHARED_COLUMNS: List[Column] = [
+    ("Source Files", "files", "{:,}"),
+    ("Tracked Files", "tracked_files", "{:,}"),
     ("Functions", "functions", "{:,}"),
     ("NLOC", "nloc", "{:,}"),
+]
+
+TABLE_COLUMNS: List[Column] = [
+    ("Project", "path", "{}"),
+    *SHARED_COLUMNS,
     ("Avg NLOC", "avg_nloc", "{:.1f}"),
     ("Avg CCN", "avg_ccn", "{:.2f}"),
     ("Max CCN", "max_ccn", "{}"),
-    ("Avg Tokens", "avg_tokens", "{:.1f}"),
+    # Lizard's per-function token count, not AI tokens.
+    ("Avg Code Tokens", "avg_tokens", "{:.1f}"),
     ("Avg Params", "avg_params", "{:.2f}"),
     ("Warnings", "warnings", "{:,}"),
     ("Warn %", "warning_ratio", "{:.1%}"),
@@ -37,6 +46,16 @@ def compact(n: float) -> str:
         if abs(n) >= limit:
             return f"{n / limit:.{2 if suffix != 'k' else 1}f}{suffix}"
     return f"{n:.0f}"
+
+
+ESTIMATE_COLUMNS: List[Column] = [
+    ("Project", "path", lambda r: r.path + (" *" if r.extrapolated else "")),
+    *SHARED_COLUMNS,
+    ("Est. Input", "input_tokens", lambda r: compact(r.input_tokens)),
+    ("Est. Output", "output_tokens", lambda r: compact(r.output_tokens)),
+    ("Est. Total", "total_tokens", lambda r: compact(r.total_tokens)),
+    ("Likely Range", "total_low", lambda r: f"{compact(r.total_low)} - {compact(r.total_high)}"),
+]
 
 
 def render_table(rows: Sequence, columns: Sequence[Column], footer=None) -> str:

@@ -125,8 +125,8 @@ def test_cli_csv_sorted(workspace, capsys):
 def test_cli_table(workspace, capsys):
     assert main([str(workspace / "alpha"), "-q"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].split()[:3] == ["Project", "Files", "Functions"]
-    assert lines[2].split()[:3] == ["alpha", "2", "2"]
+    assert lines[0].split()[:5] == ["Project", "Source", "Files", "Tracked", "Files"]
+    assert lines[2].split()[:4] == ["alpha", "2", "2", "2"]
     assert lines[-1].startswith("TOTAL")
 
 
@@ -205,7 +205,7 @@ def test_cli_estimate(workspace, capsys):
 
     assert main(["estimate", str(workspace / "group" / "beta"), "-q"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].split()[:3] == ["Project", "Tracked", "Files"]
+    assert lines[0].split()[:5] == ["Project", "Source", "Files", "Tracked", "Files"]
     assert lines[2].startswith("beta")
 
 
@@ -236,3 +236,63 @@ def test_cli_calibrate_then_estimate(tmp_path, capsys):
                  "-f", "csv"]) == 0
     row = next(csv.DictReader(io.StringIO(capsys.readouterr().out)))
     assert int(row["input_tokens"]) == pytest.approx(5000 * 8 + 30 * 64, rel=0.25)
+
+
+# --- report and estimate must agree -------------------------------------------
+
+import re
+
+from lizarder.analysis import SHARED_FIELDS
+from lizarder.report import ESTIMATE_COLUMNS, SHARED_COLUMNS, TABLE_COLUMNS
+
+
+def table_rows(text):
+    """Parse a rendered table into {project: {header: cell}}, including TOTAL."""
+    lines = [l for l in text.splitlines() if l and not l.startswith("-")]
+    headers = re.split(r"\s{2,}", lines[0].strip())
+    rows = {}
+    for line in lines[1:]:
+        if line.startswith("*") or line.startswith("error in"):
+            break
+        cells = re.split(r"\s{2,}", line.strip())
+        rows[cells[0].rstrip(" *")] = dict(zip(headers, cells))
+    return headers, rows
+
+
+def test_shared_columns_cover_shared_fields():
+    assert [attr for _, attr, _ in SHARED_COLUMNS] == list(SHARED_FIELDS)
+    for columns in (TABLE_COLUMNS, ESTIMATE_COLUMNS):
+        assert columns[1:1 + len(SHARED_COLUMNS)] == SHARED_COLUMNS
+
+
+@pytest.mark.parametrize("flags", [[], ["-x", "lib/*"], ["-l", "javascript"], ["--all-files"],
+                                   ["--nested"]])
+def test_report_and_estimate_agree(workspace, capsys, flags):
+    target = [str(workspace), "-q", *flags]
+
+    assert main([*target, "-f", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert main(["estimate", *target, "-f", "json"]) == 0
+    est = json.loads(capsys.readouterr().out)
+    assert [p["path"] for p in report["projects"]] == [p["path"] for p in est["projects"]]
+    for r, e in zip(report["projects"], est["projects"]):
+        assert {f: r[f] for f in SHARED_FIELDS} == {f: e[f] for f in SHARED_FIELDS}
+    assert {f: report["total"][f] for f in SHARED_FIELDS} == \
+           {f: est["total"][f] for f in SHARED_FIELDS}
+
+    assert main([*target, "-f", "csv"]) == 0
+    report_csv = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
+    assert main(["estimate", *target, "-f", "csv"]) == 0
+    est_csv = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
+    assert [{f: r[f] for f in SHARED_FIELDS} for r in report_csv] == \
+           [{f: r[f] for f in SHARED_FIELDS} for r in est_csv]
+
+    assert main(target) == 0
+    report_headers, report_rows = table_rows(capsys.readouterr().out)
+    assert main(["estimate", *target]) == 0
+    est_headers, est_rows = table_rows(capsys.readouterr().out)
+    shared = [h for h, _, _ in SHARED_COLUMNS]
+    assert report_headers[1:5] == est_headers[1:5] == shared
+    assert report_rows.keys() == est_rows.keys()
+    for name in report_rows:
+        assert [report_rows[name][h] for h in shared] == [est_rows[name][h] for h in shared]

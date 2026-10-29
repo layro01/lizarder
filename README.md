@@ -32,12 +32,14 @@ lizarder ~/code --nested              # also report submodules and nested repos
 ```
 
 ```shell
-Project               Files  Functions   NLOC  Avg NLOC  Avg CCN  Max CCN  Avg Tokens  Avg Params  Warnings  Warn %
---------------------  -----  ---------  -----  --------  -------  -------  ----------  ----------  --------  ------
-stockroom-api            21         25    513      10.8     1.64        4        75.4        1.28         0    0.0%
-stockroom-frontend       19         73  1,141      14.0     2.15       14        48.4        0.36         0    0.0%
---------------------  -----  ---------  -----  --------  -------  -------  ----------  ----------  --------  ------
-TOTAL                    40         98  1,654      13.2     2.02       14        55.3        0.59         0    0.0%
+Project                 Source Files  Tracked Files  Functions   NLOC  Avg NLOC  Avg CCN  Max CCN  Avg Code Tokens  Avg Params  Warnings  Warn %
+----------------------  ------------  -------------  ---------  -----  --------  -------  -------  ---------------  ----------  --------  ------
+stockroom-api                     21             31         25    513      10.8     1.64        4             75.4        1.28         0    0.0%
+stockroom-deployment               0             26          0      0       0.0     0.00        0              0.0        0.00         0    0.0%
+stockroom-frontend                19             32         73  1,141      14.0     2.15       14             48.4        0.36         0    0.0%
+stockroom-polyrepo-app             0              6          0      0       0.0     0.00        0              0.0        0.00         0    0.0%
+----------------------  ------------  -------------  ---------  -----  --------  -------  -------  ---------------  ----------  --------  ------
+TOTAL                             40             95         98  1,654      13.2     2.02       14             55.3        0.59         0    0.0%
 ```
 
 Progress goes to stderr (silence it with `-q`), so stdout holds only the report.
@@ -51,9 +53,9 @@ Progress goes to stderr (silence it with `-q`), so stdout holds only the report.
 | `-s, --sort COLUMN` | Sort by `path` (default), `project`, or any numeric metric (highest first). |
 | `--nested` | Keep searching inside Git projects so submodules and nested repos are reported separately. |
 | `--max-depth N` | Limit how deep below the directory to search. |
-| `-l, --language LANG` | Only analyse this language (repeatable). |
+| `-l, --language LANG` | Only analyse this language (repeatable). Affects Source Files, Functions and NLOC. |
 | `-x, --exclude GLOB` | Skip files whose repo-relative path matches the glob (repeatable). |
-| `--all-files` | Analyse every file on disk, not just files tracked by Git. |
+| `--all-files` | Analyse every file on disk, not just files tracked by Git. Tracked Files is still counted from Git. |
 | `-C, --ccn N` / `-L, --length N` / `-a, --arguments N` | Warning thresholds for cyclomatic complexity, function NLOC, and parameter count (Lizard's defaults: 15 / 1000 / 100). |
 | `-t, --threads N` | Number of worker threads Lizard uses per project. |
 | `-q, --quiet` | Don't print progress. |
@@ -81,20 +83,19 @@ went wrong).
 
 | Field | Meaning |
 | --- | --- |
-| `files` | Source files Lizard recognised and analysed |
+| `files` | **Source Files**: files Lizard recognised as source code and analysed |
+| `tracked_files` | **Tracked Files**: every file tracked by Git, source or not (YAML, docs, images...) |
 | `functions` | Number of functions/methods |
-| `nloc` | Total non-comment lines of code across all files |
+| `nloc` | Total non-comment lines of code across all source files |
 | `avg_nloc` | Average NLOC per function |
 | `avg_ccn` / `max_ccn` | Average and maximum cyclomatic complexity per function |
-| `avg_tokens` | Average token count per function |
+| `avg_tokens` | **Avg Code Tokens**: Lizard's average count of code tokens per function (unrelated to AI tokens) |
 | `avg_params` | Average parameter count per function |
 | `warnings` | Functions exceeding any threshold (honours `#lizard forgives` comments) |
 | `warning_ratio` | `warnings / functions` (Lizard's "Fun Rt") |
 | `nloc_warning_ratio` | NLOC inside warning functions / total NLOC (Lizard's "nloc Rt") |
 | `worst_function` | The function with the highest CCN, as `name (file:line)` |
 | `branch`, `commit` | Checked-out branch and short commit SHA |
-
-| `tracked_files` | All files tracked by Git (source or not), even with `--all-files` |
 
 JSON output also records the scan root, a timestamp, the Lizard version, the thresholds used,
 and a `total` object. CSV output has one row per project with the same fields.
@@ -113,18 +114,23 @@ lizarder estimate ~/code -m my-model.json      # use your own calibration
 ```
 
 ```shell
-Project                                Tracked Files  Functions  Est. Input  Est. Output  Est. Total     Likely Range
--------------------------------------  -------------  ---------  ----------  -----------  ----------  ---------------
-layro01-org/damn-vulnerable-ai-agent             487      1,122       7.90M        87.1k       7.99M    6.82M - 9.38M
-layro01-org/verademo-java                        113        745       2.37M        16.6k       2.38M    2.04M - 2.79M
-layro01-org/mcp-exploit-demo                       5          3       93.7k         2.9k       96.6k   81.9k - 114.6k
--------------------------------------  -------------  ---------  ----------  -----------  ----------  ---------------
-TOTAL                                            605      1,870      10.36M       106.6k      10.47M    8.94M - 12.28M
+Project                 Source Files  Tracked Files  Functions   NLOC  Est. Input  Est. Output  Est. Total     Likely Range
+----------------------  ------------  -------------  ---------  -----  ----------  -----------  ----------  ---------------
+stockroom-api                     21             31         25    513      482.4k        15.3k      497.8k  421.7k - 591.1k
+stockroom-deployment               0             26          0      0      235.7k         3.3k      239.0k  203.7k - 281.2k
+stockroom-frontend                19             32         73  1,141      596.1k        14.8k      610.9k  518.8k - 722.7k
+stockroom-polyrepo-app             0              6          0      0       82.4k         2.2k       84.6k   71.8k - 100.2k
+----------------------  ------------  -------------  ---------  -----  ----------  -----------  ----------  ---------------
+TOTAL                             40             95         98  1,654       1.40M        35.7k       1.43M    1.22M - 1.70M
 ```
 
-It accepts the output and discovery options above (`-f`, `-o`, `-s`, `-q`, `--nested`,
-`--max-depth`, `-t`), plus `-m, --model FILE`. Language and exclude filters aren't offered,
-because the model was trained on whole repositories.
+The first four metric columns are the same as the complexity report's: same names, same
+values. The two commands accept the same discovery and file-selection options (`--nested`,
+`--max-depth`, `-l`, `-x`, `--all-files`, `-t`), so the same flags always give the same
+counts. A test enforces this. `estimate` also takes `-m, --model FILE`, and sorts by
+`input_tokens`, `output_tokens` or `total_tokens` as well as the shared metrics. The bundled
+model was trained with no file-selection flags, so filtering changes what the estimate
+measures; for filtered estimates, calibrate with the same flags.
 
 ### The model
 

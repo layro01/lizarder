@@ -29,6 +29,11 @@ class Options:
     threads: int = 1
 
 
+# Project-size metrics reported by every command, under the same names and
+# column headers, so `lizarder` and `lizarder estimate` always agree.
+SHARED_FIELDS = ("files", "tracked_files", "functions", "nloc")
+
+
 @dataclass
 class ProjectMetrics:
     project: str

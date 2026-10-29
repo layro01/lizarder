@@ -19,6 +19,7 @@ from lizard_languages import languages
 from lizarder import __version__
 from lizarder.analysis import (
     DEFAULT_THRESHOLDS,
+    SHARED_FIELDS,
     Accumulator,
     Options,
     ProjectMetrics,
@@ -28,6 +29,7 @@ from lizarder.analysis import (
 from lizarder.discovery import find_git_repos
 from lizarder.estimate import (
     DEFAULT_FEATURES,
+    TOKEN_FIELDS,
     ProjectEstimate,
     TokenModel,
     all_features,
@@ -38,26 +40,23 @@ from lizarder.estimate import (
     load_usage,
     total_estimate,
 )
-from lizarder.report import FIELDS, TABLE_COLUMNS, compact, render_csv, render_json, render_table
+from lizarder.report import (
+    ESTIMATE_COLUMNS,
+    FIELDS,
+    TABLE_COLUMNS,
+    compact,
+    render_csv,
+    render_json,
+    render_table,
+)
 
 FORMATS = ("table", "json", "csv")
 METRIC_KEYS = ("files", "tracked_files", "functions", "nloc", "avg_nloc", "avg_ccn",
                "max_ccn", "avg_tokens", "avg_params", "warnings", "warning_ratio",
                "nloc_warning_ratio")
 SORT_KEYS = ("path", "project") + METRIC_KEYS
-ESTIMATE_SORT_KEYS = ("path", "project", "tracked_files", "functions", "input_tokens",
-                      "output_tokens", "total_tokens")
+ESTIMATE_SORT_KEYS = ("path", "project") + SHARED_FIELDS + TOKEN_FIELDS[:3]
 ESTIMATE_FIELDS = [f for f in ProjectEstimate.__dataclass_fields__]
-
-ESTIMATE_COLUMNS = [
-    ("Project", "path", lambda r: r.path + (" *" if r.extrapolated else "")),
-    ("Tracked Files", "tracked_files", "{:,}"),
-    ("Functions", "functions", "{:,}"),
-    ("Est. Input", "input_tokens", lambda r: compact(r.input_tokens)),
-    ("Est. Output", "output_tokens", lambda r: compact(r.output_tokens)),
-    ("Est. Total", "total_tokens", lambda r: compact(r.total_tokens)),
-    ("Likely Range", "total_low", lambda r: f"{compact(r.total_low)} - {compact(r.total_high)}"),
-]
 
 
 def language_names() -> List[str]:
@@ -96,6 +95,34 @@ def add_discovery_args(parser: argparse.ArgumentParser) -> None:
                       help="number of worker threads Lizard uses per project (default: 1)")
 
 
+def add_selection_args(parser: argparse.ArgumentParser) -> None:
+    """Which files are analysed. Shared by every command so that the same flags
+    always give the same Source Files / Functions / NLOC."""
+    sel = parser.add_argument_group("file selection")
+    sel.add_argument("-l", "--language", action="append", default=[], metavar="LANG",
+                     choices=language_names(),
+                     help="only analyse this language; repeatable "
+                          "(e.g. -l python -l java)")
+    sel.add_argument("-x", "--exclude", action="append", default=[], metavar="GLOB",
+                     help="exclude files whose repo-relative path matches GLOB; "
+                          "repeatable (e.g. -x 'tests/*' -x '*_pb2.py')")
+    sel.add_argument("--all-files", action="store_true",
+                     help="analyse every file on disk rather than only files "
+                          "tracked by Git")
+
+
+def selection_options(args: argparse.Namespace, thresholds: Optional[dict] = None) -> Options:
+    options = Options(
+        languages=args.language,
+        exclude=args.exclude,
+        tracked_only=not args.all_files,
+        threads=max(1, args.threads),
+    )
+    if thresholds:
+        options.thresholds = thresholds
+    return options
+
+
 def add_version_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--version", action="version",
                         version=f"lizarder {__version__} (lizard {lizard.version})")
@@ -117,18 +144,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_directory_arg(parser)
     add_output_args(parser, SORT_KEYS)
     add_discovery_args(parser)
+    add_selection_args(parser)
 
-    anal = parser.add_argument_group("analysis")
-    anal.add_argument("-l", "--language", action="append", default=[], metavar="LANG",
-                      choices=language_names(),
-                      help="only analyse this language; repeatable "
-                           "(e.g. -l python -l java)")
-    anal.add_argument("-x", "--exclude", action="append", default=[], metavar="GLOB",
-                      help="exclude files whose repo-relative path matches GLOB; "
-                           "repeatable (e.g. -x 'tests/*' -x '*_pb2.py')")
-    anal.add_argument("--all-files", action="store_true",
-                      help="analyse every file on disk rather than only files "
-                           "tracked by Git")
+    anal = parser.add_argument_group("warning thresholds")
     anal.add_argument("-C", "--ccn", type=int, default=DEFAULT_THRESHOLDS["cyclomatic_complexity"],
                       help="CCN warning threshold (default: %(default)s)")
     anal.add_argument("-L", "--length", type=int, default=DEFAULT_THRESHOLDS["nloc"],
@@ -144,13 +162,16 @@ def build_estimate_parser() -> argparse.ArgumentParser:
         prog="lizarder estimate",
         description="Estimate the AI tokens needed to scan each Git project under "
                     "DIRECTORY, from its size and Lizard metrics. Projects marked * "
-                    "fall outside the range the model was trained on.",
+                    "fall outside the range the model was trained on. The file "
+                    "selection flags match the main command's; the bundled model was "
+                    "trained without any.",
     )
     add_directory_arg(parser)
     parser.add_argument("-m", "--model", type=Path,
                         help="model file from 'lizarder calibrate' (default: bundled model)")
     add_output_args(parser, ESTIMATE_SORT_KEYS)
     add_discovery_args(parser)
+    add_selection_args(parser)
     add_version_arg(parser)
     return parser
 
@@ -176,6 +197,7 @@ def build_calibrate_parser() -> argparse.ArgumentParser:
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="don't print progress to stderr")
     add_discovery_args(parser)
+    add_selection_args(parser)
     add_version_arg(parser)
     parser.epilog = f"metrics: {', '.join(METRIC_KEYS)}"
     return parser
@@ -256,17 +278,11 @@ def report_main(argv: List[str]) -> int:
     root = resolve_root(parser, args)
     progress = make_progress(args)
 
-    options = Options(
-        thresholds={
-            "cyclomatic_complexity": args.ccn,
-            "nloc": args.length,
-            "parameter_count": args.arguments,
-        },
-        languages=args.language,
-        exclude=args.exclude,
-        tracked_only=not args.all_files,
-        threads=max(1, args.threads),
-    )
+    options = selection_options(args, thresholds={
+        "cyclomatic_complexity": args.ccn,
+        "nloc": args.length,
+        "parameter_count": args.arguments,
+    })
     result = scan(root, args, options, progress)
     if result is None:
         return 1
@@ -299,8 +315,7 @@ def estimate_main(argv: List[str]) -> int:
     except (OSError, ValueError, KeyError) as exc:
         parser.error(f"can't load model {args.model}: {exc}")
 
-    # The model was fitted to whole repositories, so no language/exclude filtering.
-    result = scan(root, args, Options(threads=max(1, args.threads)), progress)
+    result = scan(root, args, selection_options(args), progress)
     if result is None:
         return 1
     projects, _ = result
@@ -342,7 +357,7 @@ def calibrate_main(argv: List[str]) -> int:
     if not usage:
         parser.error(f"no completed scan records in {args.usage}")
 
-    result = scan(root, args, Options(threads=max(1, args.threads)), progress)
+    result = scan(root, args, selection_options(args), progress)
     if result is None:
         return 1
     samples, unmatched = build_samples(usage, result[0], all_features(features))
