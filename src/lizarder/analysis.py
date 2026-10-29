@@ -36,6 +36,7 @@ class ProjectMetrics:
     branch: Optional[str] = None
     commit: Optional[str] = None
     files: int = 0
+    tracked_files: int = 0
     functions: int = 0
     nloc: int = 0
     avg_nloc: float = 0.0
@@ -59,6 +60,7 @@ class Accumulator:
     def __init__(self, thresholds: Dict[str, int]):
         self.thresholds = thresholds
         self.files = 0
+        self.tracked_files = 0
         self.file_nloc = 0
         self.functions = 0
         self.fn_nloc = 0
@@ -87,8 +89,8 @@ class Accumulator:
                 self.worst = f"{fn.name} ({rel_name}:{fn.start_line})"
 
     def merge(self, other: "Accumulator") -> None:
-        for attr in ("files", "file_nloc", "functions", "fn_nloc", "ccn", "tokens",
-                     "params", "warnings", "warning_nloc"):
+        for attr in ("files", "tracked_files", "file_nloc", "functions", "fn_nloc", "ccn",
+                     "tokens", "params", "warnings", "warning_nloc"):
             setattr(self, attr, getattr(self, attr) + getattr(other, attr))
         if other.max_ccn > self.max_ccn:
             self.max_ccn, self.worst = other.max_ccn, other.worst
@@ -106,6 +108,7 @@ class Accumulator:
             return round(total / n, digits) if n else 0.0
 
         metrics.files = self.files
+        metrics.tracked_files = self.tracked_files
         metrics.functions = n
         metrics.nloc = self.file_nloc
         metrics.avg_nloc = avg(self.fn_nloc)
@@ -152,13 +155,12 @@ def walk_files(repo: Path) -> Iterator[Path]:
             yield Path(dirpath) / name
 
 
-def source_files(repo: Path, options: Options) -> List[str]:
-    candidates: Optional[Iterable[Path]] = None
-    if options.tracked_only:
-        candidates = git_tracked_files(repo)
-    if candidates is None:
-        candidates = walk_files(repo)
+def existing(paths: Iterable[Path]) -> List[Path]:
+    # Tracked files may be deleted in the working tree; symlinks may dangle.
+    return [p for p in paths if p.is_file()]
 
+
+def source_files(repo: Path, candidates: Iterable[Path], options: Options) -> List[str]:
     wanted_langs = set(options.languages)
     selected = []
     for path in candidates:
@@ -169,9 +171,6 @@ def source_files(repo: Path, options: Options) -> List[str]:
             continue
         rel = path.relative_to(repo).as_posix()
         if any(fnmatch(rel, pattern) for pattern in options.exclude):
-            continue
-        # Tracked files may be deleted in the working tree, or be symlinks.
-        if not path.is_file():
             continue
         selected.append(str(path))
     return selected
@@ -194,7 +193,12 @@ def analyze_repo(repo: Path, root: Path, options: Options) -> "tuple[ProjectMetr
     )
     acc = Accumulator(options.thresholds)
     try:
-        files = source_files(repo, options)
+        tracked = git_tracked_files(repo)
+        on_disk = existing(tracked if tracked is not None else walk_files(repo))
+        # Counted from Git even with --all-files: it's a repo-size measure, not analysis scope.
+        acc.tracked_files = len(on_disk)
+        candidates = on_disk if options.tracked_only else existing(walk_files(repo))
+        files = source_files(repo, candidates, options)
         for info in lizard.analyze_files(files, threads=options.threads):
             acc.add_file(info, os.path.relpath(info.filename, repo))
     except Exception as exc:  # keep going with the other repositories

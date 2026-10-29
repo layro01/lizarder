@@ -1,0 +1,141 @@
+{
+  "created": "2026-10-29T03:08:08+00:00",
+  "source": "token-usage.json",
+  "targets": {
+    "input_tokens": {
+      "intercept": 9.804912753982036,
+      "coefficients": {
+        "functions": 0.179294116894814,
+        "tracked_files": 0.7783413758233345
+      },
+      "loo_rmse_log": 0.1546538271903029,
+      "loo_median_error": 0.15958130808122162,
+      "loo_max_error": 0.24509490403677625
+    },
+    "output_tokens": {
+      "intercept": 7.062642341157867,
+      "coefficients": {
+        "files": 0.474904908696666,
+        "tracked_files": 0.3196738433168304
+      },
+      "loo_rmse_log": 0.6004908738067918,
+      "loo_median_error": 1.007650490812221,
+      "loo_max_error": 1.359729770852402
+    }
+  },
+  "training_range": {
+    "files": [
+      0,
+      135
+    ],
+    "functions": [
+      0,
+      1122
+    ],
+    "tracked_files": [
+      5,
+      487
+    ]
+  },
+  "samples": [
+    {
+      "project": "layro01-org/damn-vulnerable-ai-agent",
+      "path": "damn-vulnerable-ai-agent",
+      "files": 135,
+      "functions": 1122,
+      "tracked_files": 487,
+      "input_tokens": 7300627,
+      "output_tokens": 122995
+    },
+    {
+      "project": "layro01-org/damn-vulnerable-email-agent",
+      "path": "damn-vulnerable-email-agent",
+      "files": 4,
+      "functions": 12,
+      "tracked_files": 14,
+      "input_tokens": 224436,
+      "output_tokens": 6005
+    },
+    {
+      "project": "layro01-org/damn-vulnerable-llm-agent",
+      "path": "damn-vulnerable-llm-agent",
+      "files": 4,
+      "functions": 13,
+      "tracked_files": 17,
+      "input_tokens": 241693,
+      "output_tokens": 6230
+    },
+    {
+      "project": "layro01-org/damn-vulnerable-MCP-server",
+      "path": "damn-vulnerable-MCP-server",
+      "files": 31,
+      "functions": 183,
+      "tracked_files": 75,
+      "input_tokens": 1475122,
+      "output_tokens": 42867
+    },
+    {
+      "project": "layro01-org/mcp-exploit-demo",
+      "path": "mcp-exploit-demo",
+      "files": 1,
+      "functions": 3,
+      "tracked_files": 5,
+      "input_tokens": 79884,
+      "output_tokens": 5098
+    },
+    {
+      "project": "layro01-org/mcp-injection-experiments",
+      "path": "mcp-injection-experiments",
+      "files": 3,
+      "functions": 3,
+      "tracked_files": 6,
+      "input_tokens": 100704,
+      "output_tokens": 5795
+    },
+    {
+      "project": "layro01-org/stockroom-api",
+      "path": "polyrepo-app/stockroom-api",
+      "files": 21,
+      "functions": 25,
+      "tracked_files": 31,
+      "input_tokens": 575749,
+      "output_tokens": 8263
+    },
+    {
+      "project": "layro01-org/stockroom-deployment",
+      "path": "polyrepo-app/stockroom-deployment",
+      "files": 0,
+      "functions": 0,
+      "tracked_files": 26,
+      "input_tokens": 238993,
+      "output_tokens": 2606
+    },
+    {
+      "project": "layro01-org/stockroom-frontend",
+      "path": "polyrepo-app/stockroom-frontend",
+      "files": 19,
+      "functions": 73,
+      "tracked_files": 32,
+      "input_tokens": 672164,
+      "output_tokens": 7235
+    },
+    {
+      "project": "layro01-org/verademo-java",
+      "path": "verademo-java",
+      "files": 10,
+      "functions": 745,
+      "tracked_files": 113,
+      "input_tokens": 2110934,
+      "output_tokens": 14974
+    },
+    {
+      "project": "layro01-org/Vulnerable-file-reader-server",
+      "path": "Vulnerable-file-reader-server",
+      "files": 5,
+      "functions": 15,
+      "tracked_files": 11,
+      "input_tokens": 246864,
+      "output_tokens": 5375
+    }
+  ]
+}

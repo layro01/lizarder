@@ -133,3 +133,106 @@ def test_cli_table(workspace, capsys):
 def test_cli_no_repos(tmp_path, capsys):
     assert main([str(tmp_path), "-q"]) == 1
     assert "no Git projects" in capsys.readouterr().err
+
+
+# --- estimate / calibrate ----------------------------------------------------
+
+import math
+
+from lizarder.analysis import ProjectMetrics
+from lizarder.estimate import TokenModel, fit, match_project
+
+
+def synthetic_samples():
+    # input = 1000 * (1+functions)^0.5 * (1+tracked)^0.8, output = 50 * (1+files)^0.6 * (1+tracked)^0.3
+    out = []
+    for i, (functions, files, tracked) in enumerate(
+            [(0, 0, 5), (3, 1, 6), (12, 4, 14), (25, 21, 31), (73, 19, 32), (183, 31, 75),
+             (745, 10, 113), (1122, 135, 487)]):
+        out.append({
+            "project": f"org/p{i}", "path": f"p{i}",
+            "functions": functions, "files": files, "tracked_files": tracked,
+            "input_tokens": 1000 * (1 + functions) ** 0.5 * (1 + tracked) ** 0.8,
+            "output_tokens": 50 * (1 + files) ** 0.6 * (1 + tracked) ** 0.3,
+        })
+    return out
+
+
+def test_fit_recovers_exact_power_law():
+    data = fit(synthetic_samples())
+    inp = data["targets"]["input_tokens"]
+    assert math.exp(inp["intercept"]) == pytest.approx(1000, rel=1e-6)
+    assert inp["coefficients"] == pytest.approx({"functions": 0.5, "tracked_files": 0.8})
+    assert inp["loo_max_error"] == pytest.approx(0, abs=1e-6)
+    out = data["targets"]["output_tokens"]
+    assert out["coefficients"] == pytest.approx({"files": 0.6, "tracked_files": 0.3})
+
+    model = TokenModel(data)
+    pred = model.predict({"functions": 99, "files": 9, "tracked_files": 9})
+    assert pred["input_tokens"][0] == pytest.approx(1000 * 10 * 10 ** 0.8)
+    assert not model.is_extrapolation({"functions": 99, "files": 9, "tracked_files": 9})
+    assert model.is_extrapolation({"functions": 5000, "files": 9, "tracked_files": 9})
+
+
+def test_fit_needs_enough_samples():
+    with pytest.raises(ValueError, match="need at least"):
+        fit(synthetic_samples()[:4])
+
+
+def test_match_project_prefers_owner_then_unique_name():
+    projects = [ProjectMetrics(project=p.split("/")[-1], path=p) for p in
+                ["layro01/verademo-java", "layro01-org/verademo-java",
+                 "layro01-org/polyrepo-app/stockroom-api"]]
+    assert match_project("layro01-org/verademo-java", projects).path == "layro01-org/verademo-java"
+    assert match_project("layro01-org/stockroom-api", projects).path.endswith("stockroom-api")
+    assert match_project("someone/verademo-java", projects) is None  # ambiguous
+    assert match_project("x/missing", projects) is None
+
+
+def test_bundled_model_loads():
+    model = TokenModel.load()
+    est = model.predict({"functions": 10, "files": 5, "tracked_files": 16})
+    assert est["input_tokens"][1] < est["input_tokens"][0] < est["input_tokens"][2]
+
+
+def test_cli_estimate(workspace, capsys):
+    assert main(["estimate", str(workspace), "-q", "-f", "json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    alpha = doc["projects"][0]
+    assert alpha["path"] == "alpha" and alpha["tracked_files"] == 2 and alpha["functions"] == 2
+    assert alpha["total_low"] < alpha["total_tokens"] < alpha["total_high"]
+    assert doc["total"]["total_tokens"] == sum(p["total_tokens"] for p in doc["projects"])
+
+    assert main(["estimate", str(workspace / "group" / "beta"), "-q"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].split()[:3] == ["Project", "Tracked", "Files"]
+    assert lines[2].startswith("beta")
+
+
+def test_cli_calibrate_then_estimate(tmp_path, capsys):
+    root = tmp_path / "repos"
+    usage = []
+    for i, n in enumerate([1, 2, 4, 8, 16, 32]):
+        files = {f"m{j}.py": SIMPLE_PY * (j + 1) for j in range(n)}
+        files.update({f"doc{j}.md": "notes\n" for j in range(i % 3 + 1)})
+        make_repo(root / "org" / f"r{i}", files)
+        usage.append({"repository": f"org/r{i}", "status": "completed", "error": None,
+                      "input_tokens": 5000 * n + 30 * n * n, "output_tokens": 100 * n + 7})
+    usage.append({"repository": "org/gone", "status": "completed", "input_tokens": 1,
+                  "output_tokens": 1})
+    usage.append({"repository": "org/r0", "status": "failed", "input_tokens": 1})
+    usage_file = tmp_path / "usage.json"
+    usage_file.write_text(json.dumps(usage))
+    model_file = tmp_path / "model.json"
+
+    assert main(["calibrate", str(usage_file), str(root), "-q", "-o", str(model_file)]) == 0
+    captured = capsys.readouterr()
+    assert "skipping org/gone" in captured.err
+    assert "leave-one-out" in captured.out
+    data = json.loads(model_file.read_text())
+    assert len(data["samples"]) == 6
+
+    assert main(["estimate", str(root / "org" / "r3"), "-q", "-m", str(model_file),
+                 "-f", "csv"]) == 0
+    row = next(csv.DictReader(io.StringIO(capsys.readouterr().out)))
+    assert int(row["input_tokens"]) == pytest.approx(5000 * 8 + 30 * 64, rel=0.25)

@@ -94,5 +94,80 @@ went wrong).
 | `worst_function` | The function with the highest CCN, as `name (file:line)` |
 | `branch`, `commit` | Checked-out branch and short commit SHA |
 
+| `tracked_files` | All files tracked by Git (source or not), even with `--all-files` |
+
 JSON output also records the scan root, a timestamp, the Lizard version, the thresholds used,
 and a `total` object. CSV output has one row per project with the same fields.
+
+## Estimating AI token usage
+
+`lizarder estimate` predicts how many tokens an AI platform will use to scan each project. It
+finds projects the same way as the main command, so `PATH` can be a single project or a
+directory of them.
+
+```sh
+lizarder estimate ~/code/my-service
+lizarder estimate ~/code --sort total_tokens
+lizarder estimate ~/code -o estimate.csv
+lizarder estimate ~/code -m my-model.json      # use your own calibration
+```
+
+```shell
+Project                                Tracked Files  Functions  Est. Input  Est. Output  Est. Total     Likely Range
+-------------------------------------  -------------  ---------  ----------  -----------  ----------  ---------------
+layro01-org/damn-vulnerable-ai-agent             487      1,122       7.90M        87.1k       7.99M    6.82M - 9.38M
+layro01-org/verademo-java                        113        745       2.37M        16.6k       2.38M    2.04M - 2.79M
+layro01-org/mcp-exploit-demo                       5          3       93.7k         2.9k       96.6k   81.9k - 114.6k
+-------------------------------------  -------------  ---------  ----------  -----------  ----------  ---------------
+TOTAL                                            605      1,870      10.36M       106.6k      10.47M    8.94M - 12.28M
+```
+
+It accepts the output and discovery options above (`-f`, `-o`, `-s`, `-q`, `--nested`,
+`--max-depth`, `-t`), plus `-m, --model FILE`. Language and exclude filters aren't offered,
+because the model was trained on whole repositories.
+
+### The model
+
+The estimate is a log-log regression fitted to recorded scans:
+
+```text
+ln(input_tokens)  = a + b * ln(1 + functions) + c * ln(1 + tracked_files)
+ln(output_tokens) = d + e * ln(1 + files)     + f * ln(1 + tracked_files)
+```
+
+The bundled model ([src/lizarder/token_model.json](src/lizarder/token_model.json)) was fitted
+to 11 scanned repositories. Each repo was predicted from a model fitted to the other 10
+(leave-one-out cross-validation):
+
+- **Input tokens** (about 98% of the total): median error 16%, worst 25%.
+- **Output tokens**: median error about 2×. The AI-focused repos produced roughly twice the
+  output of the traditional ones, and none of the metrics capture that.
+- **Total**: every repo was within ±20%.
+
+`Likely Range` is the estimate × / ÷ the root-mean-square leave-one-out error, roughly a
+one-standard-deviation band. A project marked `*` lies outside the size range of the training
+data, so its estimate is an extrapolation.
+
+Lizard's complexity metrics on their own predict poorly (up to 5× off), because the platform
+reads every file, not just source code. A repo with no source files still cost about 240k
+tokens. The count of tracked files carries most of the signal, and Lizard's function count
+adds the rest.
+
+### Calibrating with your own data
+
+As you collect more scan results, refit the model:
+
+```sh
+lizarder calibrate token-usage.json ~/code -o my-model.json
+lizarder estimate ~/code -m my-model.json
+```
+
+`token-usage.json` is a JSON list of records with `repository` (`owner/name`),
+`input_tokens`, and `output_tokens`. Records whose `status` isn't `completed`, or that have an
+`error`, are skipped. Each record is matched to the project under `~/code` whose path ends
+with `owner/name`, falling back to a unique match on `name`. `calibrate` prints the
+leave-one-out error for every project so you can see how well the fit holds up. Use
+`--input-feature` / `--output-feature` (repeatable) to try other metrics.
+
+Metrics should come from the same commit that was scanned. If a local checkout has moved on,
+its sample will be slightly off.
