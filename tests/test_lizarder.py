@@ -296,3 +296,127 @@ def test_report_and_estimate_agree(workspace, capsys, flags):
     assert report_rows.keys() == est_rows.keys()
     for name in report_rows:
         assert [report_rows[name][h] for h in shared] == [est_rows[name][h] for h in shared]
+
+
+# --- usage formats and pricing -------------------------------------------------
+
+from lizarder.pricing import Price, PriceList
+from lizarder.usage import load_usage, normalise, parse_mapping
+
+
+def test_normalise_provider_formats():
+    # This platform / Anthropic style: input_tokens excludes cache, so cache is added.
+    assert normalise({"repository": "o/a", "status": "completed", "input_tokens": 100,
+                      "output_tokens": 5, "cache_read_input_tokens": 50,
+                      "cache_write_input_tokens": 10}) == {
+        "repository": "o/a", "input_tokens": 160, "output_tokens": 5,
+        "cache_read_input_tokens": 50, "cache_write_input_tokens": 10}
+    # OpenAI style, nested: prompt_tokens already includes cached_tokens.
+    openai = normalise({"repo": "o/b", "usage": {
+        "prompt_tokens": 100, "completion_tokens": 7,
+        "prompt_tokens_details": {"cached_tokens": 40}}})
+    assert (openai["input_tokens"], openai["output_tokens"],
+            openai["cache_read_input_tokens"]) == (100, 7, 40)
+    # Gemini style.
+    gemini = normalise({"project": "o/c", "usageMetadata": {
+        "promptTokenCount": 90, "candidatesTokenCount": 9, "cachedContentTokenCount": 30}})
+    assert (gemini["input_tokens"], gemini["cache_read_input_tokens"]) == (90, 30)
+    # Failed scans and records without tokens are dropped.
+    assert normalise({"repository": "o/d", "status": "failed", "input_tokens": 5}) is None
+    assert normalise({"repository": "o/d", "error": "boom", "input_tokens": 5}) is None
+    assert normalise({"repository": "o/d", "input_tokens": 0}) is None
+
+
+def test_normalise_explicit_mapping_and_cache_override():
+    rec = {"slug": "o/e", "stats": {"in": "200", "out": "20", "hit": "50"}}
+    mapping = parse_mapping(["repository=slug", "input_tokens=stats.in",
+                             "output_tokens=stats.out", "cache_read_input_tokens=stats.hit"])
+    assert normalise(rec, mapping)["input_tokens"] == 250  # cache added by default
+    assert normalise(rec, mapping, input_includes_cache=True)["input_tokens"] == 200
+    with pytest.raises(ValueError, match="bad mapping"):
+        parse_mapping(["tokens=x"])
+
+
+def test_load_usage_csv_jsonl_and_wrapped_json(tmp_path):
+    (tmp_path / "u.csv").write_text("repo,prompt_tokens,completion_tokens,status\n"
+                                    "o/a,100,10,completed\no/b,5,1,failed\n")
+    (tmp_path / "u.jsonl").write_text('{"repository": "o/a", "input_tokens": 3, '
+                                      '"output_tokens": 1}\n\n')
+    (tmp_path / "u.json").write_text(json.dumps({"meta": 1, "data": [
+        {"repository": "o/a", "input_tokens": 3, "output_tokens": 1}]}))
+    assert [r["repository"] for r in load_usage(tmp_path / "u.csv")] == ["o/a"]
+    assert load_usage(tmp_path / "u.jsonl")[0]["input_tokens"] == 3
+    assert len(load_usage(tmp_path / "u.json")) == 1
+
+
+def test_price_cost_with_cache_shares():
+    p = Price("x", input_per_million=4.0, output_per_million=20.0, cache_read_per_million=0.4)
+    assert p.cost(1_000_000, 100_000) == pytest.approx(4.0 + 2.0)
+    # 50% of input read from cache at a tenth of the price; no write rate -> input rate.
+    assert p.cost(1_000_000, 0, cache_read_share=0.5) == pytest.approx(2.0 + 0.2)
+    assert p.cost(1_000_000, 0, cache_write_share=0.5) == pytest.approx(4.0)
+
+
+def test_bundled_prices_and_validation(tmp_path):
+    prices = PriceList.load()
+    assert prices.prices["claude-opus-5-5"].input_per_million == 4.0
+    assert [p.name for p in prices.select(["all"])] == list(prices.prices)
+    with pytest.raises(ValueError, match="unknown price"):
+        prices.select(["nope"])
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"prices": {"x": {"input_per_million": 1}}}))
+    with pytest.raises(ValueError, match="output_per_million"):
+        PriceList.load(bad)
+
+
+def test_cli_estimate_costs(workspace, tmp_path, capsys):
+    pricing = tmp_path / "prices.json"
+    pricing.write_text(json.dumps({"currency": "USD", "prices": {
+        "acme-large": {"provider": "acme", "input_per_million": 1.0, "output_per_million": 2.0},
+        "acme-small": {"provider": "acme", "input_per_million": 0.5, "output_per_million": 1.0},
+    }}))
+    base = ["estimate", str(workspace), "-q", "--pricing", str(pricing)]
+
+    assert main([*base, "--list-prices"]) == 0
+    assert "acme-large" in capsys.readouterr().out
+
+    assert main([*base, "-p", "all", "-f", "json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    p = doc["projects"][0]
+    expected = (p["input_tokens"] * 1.0 + p["output_tokens"] * 2.0) / 1e6
+    assert p["costs"]["acme-large"]["cost"] == pytest.approx(expected, abs=1e-4)
+    assert p["costs"]["acme-large"]["low"] < p["costs"]["acme-large"]["cost"] \
+        < p["costs"]["acme-large"]["high"]
+    assert doc["total"]["costs"]["acme-small"]["cost"] == pytest.approx(
+        sum(q["costs"]["acme-small"]["cost"] for q in doc["projects"]), abs=1e-3)
+    assert set(doc["pricing"]["prices"]) == {"acme-large", "acme-small"}
+
+    assert main([*base, "-p", "acme-small", "-f", "csv"]) == 0
+    row = next(csv.DictReader(io.StringIO(capsys.readouterr().out)))
+    assert {"cost_acme-small", "cost_acme-small_low", "cost_acme-small_high"} <= row.keys()
+    assert "costs" not in row
+
+    assert main([*base, "-p", "acme-large"]) == 0
+    assert "Cost (acme-large)" in capsys.readouterr().out.splitlines()[0]
+
+
+def test_cli_calibrate_openai_style_usage(tmp_path, capsys):
+    root = tmp_path / "repos"
+    rows = ["repo_slug,prompt_tokens,completion_tokens,cached"]
+    for i, n in enumerate([1, 2, 4, 8, 16, 32]):
+        files = {f"m{j}.py": SIMPLE_PY * (j + 1) for j in range(n)}
+        files.update({f"doc{j}.md": "notes\n" for j in range(i % 3 + 1)})
+        make_repo(root / "org" / f"r{i}", files)
+        total_in = 5000 * n + 30 * n * n
+        rows.append(f"org/r{i},{total_in},{100 * n + 7},{total_in // 4}")
+    usage = tmp_path / "openai-usage.csv"
+    usage.write_text("\n".join(rows) + "\n")
+    model_file = tmp_path / "model.json"
+
+    assert main(["calibrate", str(usage), str(root), "-q", "-o", str(model_file),
+                 "--map", "repository=repo_slug", "--map", "cache_read_input_tokens=cached"]) == 0
+    capsys.readouterr()
+    data = json.loads(model_file.read_text())
+    assert len(data["samples"]) == 6
+    # prompt_tokens includes cached tokens, so a quarter of input was cache reads.
+    assert data["cache_read_share"] == pytest.approx(0.25, abs=0.01)

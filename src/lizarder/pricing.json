@@ -1,0 +1,37 @@
+{
+  "currency": "USD",
+  "prices": {
+    "claude-fable-5-1": {
+      "provider": "anthropic",
+      "input_per_million": 10.0,
+      "output_per_million": 50.0,
+      "cache_read_per_million": 0.25,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-06"
+    },
+    "claude-opus-5-5": {
+      "provider": "anthropic",
+      "input_per_million": 4.0,
+      "output_per_million": 20.0,
+      "cache_read_per_million": 0.20,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-06"
+    },
+    "claude-sonnet-5-5": {
+      "provider": "anthropic",
+      "input_per_million": 2.0,
+      "output_per_million": 10.0,
+      "cache_read_per_million": 0.20,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-06"
+    },
+    "claude-haiku-5-5": {
+      "provider": "anthropic",
+      "input_per_million": 0.10,
+      "output_per_million": 0.50,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-06",
+      "note": "prompts up to 100K tokens; $0.50/$2.50 beyond"
+    }
+  }
+}

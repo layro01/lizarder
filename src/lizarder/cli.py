@@ -37,9 +37,9 @@ from lizarder.estimate import (
     estimate,
     fit,
     leave_one_out,
-    load_usage,
     total_estimate,
 )
+from lizarder.pricing import PriceList, money
 from lizarder.report import (
     ESTIMATE_COLUMNS,
     FIELDS,
@@ -49,6 +49,8 @@ from lizarder.report import (
     render_json,
     render_table,
 )
+from lizarder.usage import FIELDS as USAGE_FIELDS
+from lizarder.usage import load_usage, parse_mapping
 
 FORMATS = ("table", "json", "csv")
 METRIC_KEYS = ("files", "tracked_files", "functions", "nloc", "avg_nloc", "avg_ccn",
@@ -56,7 +58,7 @@ METRIC_KEYS = ("files", "tracked_files", "functions", "nloc", "avg_nloc", "avg_c
                "nloc_warning_ratio")
 SORT_KEYS = ("path", "project") + METRIC_KEYS
 ESTIMATE_SORT_KEYS = ("path", "project") + SHARED_FIELDS + TOKEN_FIELDS[:3]
-ESTIMATE_FIELDS = [f for f in ProjectEstimate.__dataclass_fields__]
+ESTIMATE_FIELDS = [f for f in ProjectEstimate.__dataclass_fields__ if f != "costs"]
 
 
 def language_names() -> List[str]:
@@ -168,7 +170,15 @@ def build_estimate_parser() -> argparse.ArgumentParser:
     )
     add_directory_arg(parser)
     parser.add_argument("-m", "--model", type=Path,
-                        help="model file from 'lizarder calibrate' (default: bundled model)")
+                        help="token model from 'lizarder calibrate' (default: bundled model)")
+    cost = parser.add_argument_group("cost")
+    cost.add_argument("-p", "--price", action="append", default=[], metavar="NAME",
+                      help="add an estimated cost column using this price from the "
+                           "pricing file; repeatable, or 'all'")
+    cost.add_argument("--pricing", type=Path, metavar="FILE",
+                      help="pricing file (default: bundled Claude prices)")
+    cost.add_argument("--list-prices", action="store_true",
+                      help="show the prices in the pricing file and exit")
     add_output_args(parser, ESTIMATE_SORT_KEYS)
     add_discovery_args(parser)
     add_selection_args(parser)
@@ -194,6 +204,16 @@ def build_calibrate_parser() -> argparse.ArgumentParser:
                             metavar="METRIC",
                             help=f"metric to predict {target} tokens from; repeatable "
                                  f"(default: {defaults})")
+    parser.add_argument("--map", action="append", default=[], metavar="FIELD=SOURCE",
+                        help="read a standard usage field from a differently named source "
+                             "field (dotted paths reach into nested objects); repeatable, "
+                             "e.g. --map repository=repo_slug --map input_tokens=usage.in. "
+                             f"Fields: {', '.join(USAGE_FIELDS)}")
+    parser.add_argument("--input-includes-cache", choices=("auto", "yes", "no"),
+                        default="auto",
+                        help="whether the input token count already includes cached tokens "
+                             "(auto: yes for prompt_tokens/promptTokenCount, no for "
+                             "input_tokens, whose cache counts are added)")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="don't print progress to stderr")
     add_discovery_args(parser)
@@ -308,6 +328,14 @@ def report_main(argv: List[str]) -> int:
 def estimate_main(argv: List[str]) -> int:
     parser = build_estimate_parser()
     args = parser.parse_args(argv)
+    try:
+        price_list = PriceList.load(args.pricing)
+        prices = price_list.select(args.price)
+    except (OSError, ValueError) as exc:
+        parser.error(f"pricing: {exc}")
+    if args.list_prices:
+        sys.stdout.write(price_list.describe())
+        return 0
     root = resolve_root(parser, args)
     progress = make_progress(args)
     try:
@@ -319,7 +347,7 @@ def estimate_main(argv: List[str]) -> int:
     if result is None:
         return 1
     projects, _ = result
-    estimates = sort_rows([estimate(m, model) for m in projects], args.sort)
+    estimates = sort_rows([estimate(m, model, prices) for m in projects], args.sort)
     total = total_estimate(estimates)
 
     fmt = resolve_format(args)
@@ -328,11 +356,22 @@ def estimate_main(argv: List[str]) -> int:
         for key in ("project", "path", "error"):
             total_dict.pop(key)
         meta = {**base_meta(root), "model": model.summary()}
+        if prices:
+            meta["pricing"] = {
+                "path": str(price_list.path),
+                "currency": price_list.currency,
+                "prices": {p.name: price_list.raw[p.name] for p in prices},
+            }
         text = render_json(estimates, total_dict, meta)
     elif fmt == "csv":
-        text = render_csv(estimates, ESTIMATE_FIELDS)
+        cost_fields = [f"cost_{p.name}{suffix}" for p in prices for suffix in ("", "_low", "_high")]
+        text = render_csv(estimates, ESTIMATE_FIELDS + cost_fields)
     else:
-        text = render_table(estimates, ESTIMATE_COLUMNS, total)
+        cost_columns = [(f"Cost ({p.name})", "costs",
+                         lambda r, n=p.name: money(r.costs[n]["cost"], price_list.currency)
+                         if n in r.costs else "-")
+                        for p in prices]
+        text = render_table(estimates, ESTIMATE_COLUMNS + cost_columns, total)
         if total.extrapolated:
             text += ("\n* outside the size range the model was trained on; "
                      "treat as a rough guess\n")
@@ -351,7 +390,8 @@ def calibrate_main(argv: List[str]) -> int:
     }
 
     try:
-        usage = load_usage(args.usage)
+        includes = {"auto": None, "yes": True, "no": False}[args.input_includes_cache]
+        usage = load_usage(args.usage, parse_mapping(args.map), includes)
     except (OSError, ValueError) as exc:
         parser.error(f"can't read usage file {args.usage}: {exc}")
     if not usage:

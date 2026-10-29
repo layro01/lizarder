@@ -111,6 +111,7 @@ lizarder estimate ~/code/my-service
 lizarder estimate ~/code --sort total_tokens
 lizarder estimate ~/code -o estimate.csv
 lizarder estimate ~/code -m my-model.json      # use your own calibration
+lizarder estimate ~/code -p claude-sonnet-5-5   # add a cost column
 ```
 
 ```shell
@@ -127,7 +128,8 @@ TOTAL                             40             95         98  1,654       1.40
 The first four metric columns are the same as the complexity report's: same names, same
 values. The two commands accept the same discovery and file-selection options (`--nested`,
 `--max-depth`, `-l`, `-x`, `--all-files`, `-t`), so the same flags always give the same
-counts. A test enforces this. `estimate` also takes `-m, --model FILE`, and sorts by
+counts. A test enforces this. `estimate` also takes `-m, --model FILE` and the cost options (`-p`, `--pricing`,
+`--list-prices`, see [Estimating cost](#estimating-cost)), and sorts by
 `input_tokens`, `output_tokens` or `total_tokens` as well as the shared metrics. The bundled
 model was trained with no file-selection flags, so filtering changes what the estimate
 measures; for filtered estimates, calibrate with the same flags.
@@ -168,12 +170,118 @@ lizarder calibrate token-usage.json ~/code -o my-model.json
 lizarder estimate ~/code -m my-model.json
 ```
 
-`token-usage.json` is a JSON list of records with `repository` (`owner/name`),
-`input_tokens`, and `output_tokens`. Records whose `status` isn't `completed`, or that have an
-`error`, are skipped. Each record is matched to the project under `~/code` whose path ends
-with `owner/name`, falling back to a unique match on `name`. `calibrate` prints the
-leave-one-out error for every project so you can see how well the fit holds up. Use
-`--input-feature` / `--output-feature` (repeatable) to try other metrics.
+Each usage record is matched to the project under `~/code` whose path ends with its
+`owner/name`, falling back to a unique match on `name`. `calibrate` prints the leave-one-out
+error for every project so you can see how well the fit holds up. Use `--input-feature` /
+`--output-feature` (repeatable) to try other metrics.
 
 Metrics should come from the same commit that was scanned. If a local checkout has moved on,
 its sample will be slightly off.
+
+### Usage file format
+
+`calibrate` reads JSON (a list, or an object containing a list), JSON Lines (`.jsonl`), or
+CSV. Every record is normalised to one standard shape:
+
+| Field | Meaning |
+| --- | --- |
+| `repository` | `owner/name` (or `name`) of the scanned repo |
+| `input_tokens` | All input tokens processed, **including** cached ones |
+| `output_tokens` | Output tokens |
+| `cache_read_input_tokens` | The part of the input read from a prompt cache (optional) |
+| `cache_write_input_tokens` | The part of the input written to a prompt cache (optional) |
+
+Common field names from different systems are recognised automatically, including inside
+nested objects such as `usage` or `usageMetadata`:
+
+| Standard field | Also accepted |
+| --- | --- |
+| `repository` | `repo`, `repo_name`, `full_name`, `project` |
+| `input_tokens` | `inputTokens`, `prompt_tokens` (OpenAI), `promptTokenCount` (Gemini), `input` |
+| `output_tokens` | `outputTokens`, `completion_tokens` (OpenAI), `candidatesTokenCount` (Gemini), `output` |
+| `cache_read_input_tokens` | `cacheReadInputTokens`, `cache_read_tokens`, `cached_tokens` (OpenAI), `cachedContentTokenCount` (Gemini) |
+| `cache_write_input_tokens` | `cache_creation_input_tokens` (Anthropic), `cacheWriteInputTokens`, `cache_write_tokens` |
+
+Records with a `status` other than `completed`/`succeeded`/`success`/`ok`/`done`, or with an
+`error`, are skipped.
+
+Providers disagree on whether the input count includes cached tokens. OpenAI's
+`prompt_tokens` and Gemini's `promptTokenCount` include them. Anthropic-style
+`input_tokens` doesn't, so lizarder adds the cache counts to it. Override the guess with
+`--input-includes-cache yes|no`.
+
+For anything else, map fields explicitly. Dotted paths reach into nested objects:
+
+```sh
+lizarder calibrate scans.csv ~/code -o acme-model.json \
+  --map repository=repo_slug --map input_tokens=stats.in --map output_tokens=stats.out
+```
+
+## Estimating cost
+
+Add one or more cost columns with `-p/--price`:
+
+```sh
+lizarder estimate --list-prices                    # what's in the pricing file
+lizarder estimate ~/code -p claude-sonnet-5-5
+lizarder estimate ~/code -p claude-opus-5-5 -p claude-haiku-5-5
+lizarder estimate ~/code -p all -o costs.json
+```
+
+The table shows the point estimate. JSON (`costs`) and CSV (`cost_<name>`,
+`cost_<name>_low`, `cost_<name>_high`) also carry the range. JSON output records the exact
+prices used.
+
+The bundled [pricing file](src/lizarder/pricing.json) has Claude API list prices as of
+2026-10-06. Check the [pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
+for changes. Claude Haiku 5.5's listed price applies to prompts up to 100K tokens; agentic
+scans with longer prompts cost more than the estimate shows.
+
+### Adding other providers
+
+Write your own pricing file and pass it with `--pricing`. Rates are per million tokens, and
+the cache rates are optional:
+
+```json
+{
+  "currency": "USD",
+  "prices": {
+    "acme-large": {
+      "provider": "acme",
+      "input_per_million": 3.0,
+      "output_per_million": 12.0,
+      "cache_read_per_million": 0.3,
+      "source": "https://acme.example/pricing",
+      "as_of": "2026-10-29"
+    }
+  }
+}
+```
+
+```sh
+lizarder estimate ~/code --pricing my-prices.json -p acme-large
+```
+
+Cached input is billed at the cache rates in proportion to how much caching the token
+model's training scans used (`cache_read_share` / `cache_write_share` in the model file). A
+missing cache rate falls back to the input rate. The bundled model's training scans used no
+caching, so it prices all input at the full input rate.
+
+### Token volume differs by provider
+
+A price list changes the rate, not the token count. The bundled token model was fitted to one
+platform's scans, and other providers can use noticeably different token counts for the same
+repo: tokenizers differ, and so do the agent's prompts, tool calls, and how much it reads.
+Applying another provider's prices to the bundled model answers "what would these tokens cost
+at that rate?", not "what would that provider's scan cost?".
+
+For a real estimate of another provider, scan a handful of repos with it and calibrate a
+model from its usage export:
+
+```sh
+lizarder calibrate acme-usage.jsonl ~/code -o acme-model.json
+lizarder estimate ~/code -m acme-model.json --pricing my-prices.json -p acme-large
+```
+
+`-m` sets whose token counts to use and `--price` sets whose rates, so the two choices stay
+independent.

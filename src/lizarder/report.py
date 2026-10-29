@@ -104,5 +104,6 @@ def render_csv(rows: Sequence, fieldnames: Sequence[str] = FIELDS) -> str:
     writer = csv.DictWriter(buf, fieldnames=list(fieldnames), lineterminator="\n")
     writer.writeheader()
     for r in rows:
-        writer.writerow(r.to_dict())
+        # Rows with nested data provide a flat to_row() for CSV.
+        writer.writerow(r.to_row() if hasattr(r, "to_row") else r.to_dict())
     return buf.getvalue()

@@ -20,4 +20,4 @@ lizarder = "lizarder.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-lizarder = ["token_model.json"]
+lizarder = ["token_model.json", "pricing.json"]

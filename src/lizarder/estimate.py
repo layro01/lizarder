@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from lizarder.analysis import SHARED_FIELDS, ProjectMetrics
+from lizarder.pricing import Price
 
 TARGETS = ("input_tokens", "output_tokens")
 # Chosen by leave-one-out error on the bundled training data. Output tokens
@@ -46,9 +47,20 @@ class ProjectEstimate:
     total_high: int = 0
     extrapolated: bool = False
     error: Optional[str] = None
+    # {price name: {"cost", "low", "high"}}, one per selected price.
+    costs: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def to_row(self) -> dict:
+        """Flat form for CSV: costs become cost_<name>, cost_<name>_low/_high."""
+        row = asdict(self)
+        for name, c in row.pop("costs").items():
+            row[f"cost_{name}"] = c["cost"]
+            row[f"cost_{name}_low"] = c["low"]
+            row[f"cost_{name}_high"] = c["high"]
+        return row
 
 
 def _row(features: Sequence[str], values: dict) -> List[float]:
@@ -123,10 +135,17 @@ def fit(samples: List[dict], features: Optional[Dict[str, Sequence[str]]] = None
             "loo_median_error": math.exp(errs[len(errs) // 2]) - 1,
             "loo_max_error": math.exp(errs[-1]) - 1,
         }
+    total_input = sum(s["input_tokens"] for s in samples)
     return {
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source": source,
         "targets": targets,
+        # Share of input tokens served from / written to a prompt cache in the
+        # training scans, so cost estimates can price cached input separately.
+        "cache_read_share": sum(s.get("cache_read_input_tokens", 0) for s in samples)
+                            / total_input,
+        "cache_write_share": sum(s.get("cache_write_input_tokens", 0) for s in samples)
+                             / total_input,
         "training_range": {f: [min(s[f] for s in samples), max(s[f] for s in samples)]
                            for f in all_features(features)},
         "samples": samples,
@@ -158,6 +177,10 @@ class TokenModel:
             out[target] = (est, est / spread, est * spread)
         return out
 
+    @property
+    def cache_shares(self) -> Tuple[float, float]:
+        return self.data.get("cache_read_share", 0.0), self.data.get("cache_write_share", 0.0)
+
     def is_extrapolation(self, values: dict) -> bool:
         return any(not lo <= values[f] <= hi
                    for f, (lo, hi) in self.data["training_range"].items())
@@ -168,6 +191,8 @@ class TokenModel:
             "features": self.features,
             "samples": len(self.data["samples"]),
             "created": self.data.get("created"),
+            "cache_read_share": round(self.cache_shares[0], 4),
+            "cache_write_share": round(self.cache_shares[1], 4),
             "loo_median_error": {t: round(v["loo_median_error"], 4)
                                  for t, v in self.data["targets"].items()},
         }
@@ -176,7 +201,8 @@ class TokenModel:
 TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "total_low", "total_high")
 
 
-def estimate(metrics: ProjectMetrics, model: TokenModel) -> ProjectEstimate:
+def estimate(metrics: ProjectMetrics, model: TokenModel,
+             prices: Sequence[Price] = ()) -> ProjectEstimate:
     est = ProjectEstimate(project=metrics.project, path=metrics.path, error=metrics.error,
                           **{f: getattr(metrics, f) for f in SHARED_FIELDS})
     if metrics.error:
@@ -189,6 +215,14 @@ def estimate(metrics: ProjectMetrics, model: TokenModel) -> ProjectEstimate:
     est.total_low = round(sum(p[1] for p in pred.values()))
     est.total_high = round(sum(p[2] for p in pred.values()))
     est.extrapolated = model.is_extrapolation(values)
+    shares = model.cache_shares
+    (inp, in_lo, in_hi), (out, out_lo, out_hi) = pred["input_tokens"], pred["output_tokens"]
+    for price in prices:
+        est.costs[price.name] = {
+            "cost": round(price.cost(inp, out, *shares), 4),
+            "low": round(price.cost(in_lo, out_lo, *shares), 4),
+            "high": round(price.cost(in_hi, out_hi, *shares), 4),
+        }
     return est
 
 
@@ -197,21 +231,15 @@ def total_estimate(estimates: Sequence[ProjectEstimate]) -> ProjectEstimate:
     for e in estimates:
         for attr in SHARED_FIELDS + TOKEN_FIELDS:
             setattr(total, attr, getattr(total, attr) + getattr(e, attr))
+        for name, c in e.costs.items():
+            t = total.costs.setdefault(name, {"cost": 0.0, "low": 0.0, "high": 0.0})
+            for k in t:
+                t[k] = round(t[k] + c[k], 4)
     total.extrapolated = any(e.extrapolated for e in estimates)
     return total
 
 
 # --- calibration from recorded usage ---------------------------------------
-
-def load_usage(path: Path) -> List[dict]:
-    """Completed, error-free scan records from a token usage JSON file."""
-    records = json.loads(Path(path).read_text(encoding="utf-8"))
-    if isinstance(records, dict):
-        records = records.get("records") or records.get("scans") or []
-    return [r for r in records
-            if r.get("repository") and r.get("status", "completed") == "completed"
-            and not r.get("error") and r.get("input_tokens")]
-
 
 def match_project(repository: str, projects: Sequence[ProjectMetrics]) -> Optional[ProjectMetrics]:
     """Find the scanned project for a usage record's `owner/name` repository.
@@ -239,5 +267,7 @@ def build_samples(usage: Sequence[dict], projects: Sequence[ProjectMetrics],
         sample = {"project": record["repository"], "path": project.path}
         sample.update({f: getattr(project, f) for f in features})
         sample.update({t: int(record.get(t) or 0) for t in TARGETS})
+        for cache in ("cache_read_input_tokens", "cache_write_input_tokens"):
+            sample[cache] = int(record.get(cache) or 0)
         samples.append(sample)
     return samples, unmatched
